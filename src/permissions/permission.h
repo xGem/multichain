@@ -7,6 +7,7 @@
 #include "utils/declare.h"
 #include "utils/dbwrapper.h"
 
+#define MC_PTP_NONE             0x00000000
 #define MC_PTP_CONNECT          0x00000001
 #define MC_PTP_SEND             0x00000002
 #define MC_PTP_RECEIVE          0x00000004
@@ -19,6 +20,7 @@
 #define MC_PTP_UPGRADE          0x00010000
 #define MC_PTP_BLOCK_MINER      0x01000000
 #define MC_PTP_BLOCK_INDEX      0x02000000
+#define MC_PTP_SPECIFIED        0x80000000
 #define MC_PTP_ALL              0x00FFFFFF
 #define MC_PTP_GLOBAL_ALL       0x00003137
 
@@ -290,8 +292,11 @@ typedef struct mc_Permissions
     int RollBackToCheckPoint();
     
     uint32_t GetAllPermissions(const void* lpEntity,const void* lpAddress,uint32_t type);
-    uint32_t GetPermissionType(const char *str,int entity_type);
+    uint32_t GetPermissionType(const char *str,uint32_t full_type);
+//    uint32_t GetPermissionType(const char *str,int entity_type);
+    uint32_t GetPermissionType(const char *str,const void *entity_details);
     uint32_t GetPossiblePermissionTypes(uint32_t entity_type);
+    uint32_t GetPossiblePermissionTypes(const void *entity_details);
     
     int GetAdminCount();
     int GetMinerCount();

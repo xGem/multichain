@@ -30,10 +30,11 @@
 #include "multichain/multichain.h"
 #include "wallet/wallettxs.h"
 #include "script/script.h"
+#include "protocol/relay.h"
 
 
 extern mc_WalletTxs* pwalletTxsMain;
-
+extern mc_RelayManager* pRelayManager;
 
 /* MCHN END */
 
@@ -52,6 +53,7 @@ bool AcceptMultiChainTransaction(const CTransaction& tx,
                                  int offset,
                                  bool accept,
                                  string& reason,
+                                 int64_t *mandatory_fee_out,     
                                  uint32_t *replay);
 bool ExtractDestinationScriptValid(const CScript& scriptPubKey, CTxDestination& addressRet);
 bool AcceptAssetTransfers(const CTransaction& tx, const CCoinsViewCache &inputs, string& reason);
@@ -61,6 +63,7 @@ bool ReplayMemPool(CTxMemPool& pool, int from,bool accept);
 bool VerifyBlockSignature(CBlock *block,bool force);
 bool VerifyBlockMiner(CBlock *block,CBlockIndex* pindexNew);
 bool CheckBlockPermissions(const CBlock& block,CBlockIndex* prev_block,unsigned char *lpMinerAddress);
+bool ProcessMultichainRelay(CNode* pfrom, CDataStream& vRecv, CValidationState &state);
 bool ProcessMultichainVerack(CNode* pfrom, CDataStream& vRecv,bool fIsVerackack,bool *disconnect_flag);
 bool PushMultiChainVerack(CNode* pfrom, bool fIsVerackack);
 bool MultichainNode_CanConnect(CNode *pnode);
@@ -71,7 +74,9 @@ bool MultichainNode_SendInv(CNode *pnode);
 bool MultichainNode_AcceptData(CNode *pnode);
 bool MultichainNode_IgnoreIncoming(CNode *pnode);
 bool MultichainNode_IsLocal(CNode *pnode);
+bool MultichainNode_CollectChunks();
 bool IsTxBanned(uint256 txid);
+int CreateUpgradeLists(int current_height,vector<mc_UpgradedParameter> *vParams,vector<mc_UpgradeStatus> *vUpgrades);
 
 
 
@@ -347,7 +352,154 @@ map<NodeId, CNodeState> mapNodeState;
 
 /* MCHN START */
 
+int SetUpgradedParamValue(const mc_OneMultichainParam *param,int64_t value)
+{
+    if(mc_gState->m_Features->ParameterUpgrades() == 0)
+    {
+        return MC_ERR_NOERROR;        
+    }
+    
+    if(strcmp(param->m_Name,"maximumblocksize") == 0)
+    {
+        MAX_BLOCK_SIZE=(unsigned int)value;    
+        DEFAULT_BLOCK_MAX_SIZE=MAX_BLOCK_SIZE;    
+        while(MAX_BLOCK_SIZE>MAX_BLOCKFILE_SIZE)
+        {
+            MAX_BLOCKFILE_SIZE *= 2;
+        }
+        while(MAX_BLOCK_SIZE>MAX_SIZE)
+        {
+            MAX_SIZE *= 2;
+        }
+        MAX_BLOCK_SIGOPS = MAX_BLOCK_SIZE/50;
+        MAX_TX_SIGOPS = MAX_BLOCK_SIGOPS/5;        
+    }
+
+    if(strcmp(param->m_Name,"targetblocktime") == 0)
+    {
+        MCP_TARGET_BLOCK_TIME=value;
+        SetMultiChainParam("targetblocktime",value);
+    }   
+    
+    if(strcmp(param->m_Name,"maxstdtxsize") == 0)
+    {
+        MAX_STANDARD_TX_SIZE=value;
+    }   
+    
+    if(strcmp(param->m_Name,"maxstdopreturnscount") == 0)
+    {
+        MCP_MAX_STD_OP_RETURN_COUNT=value;
+    }   
+    
+    if(strcmp(param->m_Name,"maxstdopreturnsize") == 0)
+    {
+        MAX_OP_RETURN_RELAY=value;    
+        MAX_OP_RETURN_RELAY=GetArg("-datacarriersize", MAX_OP_RETURN_RELAY);
+    }   
+    
+    if(strcmp(param->m_Name,"maxstdopdropscount") == 0)
+    {
+        MCP_STD_OP_DROP_COUNT=value;
+        pwalletMain->InitializeUnspentList();        
+    }   
+    
+    if(strcmp(param->m_Name,"maxstdelementsize") == 0)
+    {
+        MAX_SCRIPT_ELEMENT_SIZE=value;
+        pwalletMain->InitializeUnspentList();        
+    }   
+    
+    if(strcmp(param->m_Name,"maximumchunksize") == 0)
+    {
+        int old_value=MAX_CHUNK_SIZE;
+        MAX_CHUNK_SIZE=(unsigned int)value;    
+
+        while(MAX_CHUNK_SIZE+OFFCHAIN_MSG_PADDING>MAX_SIZE)
+        {
+            MAX_SIZE *= 2;
+        }
+
+        if(MAX_CHUNK_SIZE > old_value)
+        {
+            if(pwalletTxsMain)
+            {
+                if(pwalletTxsMain->m_ChunkBuffer)
+                {
+                    mc_Delete(pwalletTxsMain->m_ChunkBuffer);
+                    pwalletTxsMain->m_ChunkBuffer=(unsigned char*)mc_New(MAX_CHUNK_SIZE);                        
+                }
+            }
+        }
+    }
+
+    if(strcmp(param->m_Name,"maximumchunkcount") == 0)
+    {
+        MAX_CHUNK_COUNT=value;
+    }           
+    
+    return MC_ERR_NOERROR;
+}
+
 int MultichainNode_ApplyUpgrades(int current_height)
+{
+    vector<mc_UpgradedParameter> vParams;
+    int err=MC_ERR_NOERROR;
+    
+    err=CreateUpgradeLists(current_height,&vParams,NULL);
+    
+    int OriginalProtocolVersion=(int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
+    int CurrentProtocolVersion=mc_gState->m_NetworkParams->ProtocolVersion();//mc_gState->m_ProtocolVersionToUpgrade;
+    
+    mc_gState->m_NetworkParams->m_ProtocolVersion=OriginalProtocolVersion;
+    mc_gState->m_NetworkParams->SetGlobals();
+    for(int p=0;p<(int)vParams.size();p++)
+    {
+        if(vParams[p].m_Skipped == MC_PSK_APPLIED)
+        {
+            if(strcmp(vParams[p].m_Param->m_Name,"protocolversion") == 0)
+            {
+                mc_gState->m_NetworkParams->m_ProtocolVersion=(int)vParams[p].m_Value;
+                mc_gState->m_NetworkParams->SetProtocolGlobals();
+            }
+            else
+            {
+                SetUpgradedParamValue(vParams[p].m_Param,vParams[p].m_Value);
+            }
+        }
+    }
+    SetMultiChainParams();            
+    mc_gState->m_ProtocolVersionToUpgrade=mc_gState->m_NetworkParams->m_ProtocolVersion;
+    
+    
+    if(mc_gState->m_ProtocolVersionToUpgrade != CurrentProtocolVersion)
+    {
+        LogPrintf("New protocol upgrade version: %d (was %d)\n",mc_gState->m_ProtocolVersionToUpgrade,CurrentProtocolVersion);
+        if( (err == MC_ERR_NOT_SUPPORTED) || ((mc_gState->m_ProtocolVersionToUpgrade > 0) && (mc_gState->IsSupported(mc_gState->m_ProtocolVersionToUpgrade) == 0)) )
+        {
+            mc_gState->m_NetworkParams->m_ProtocolVersion=CurrentProtocolVersion;
+            LogPrintf("NODE SHOULD BE UPGRADED FROM %d TO %d\n",mc_gState->GetProtocolVersion(),mc_gState->m_ProtocolVersionToUpgrade);
+        }
+        else
+        {
+            LogPrintf("NODE IS UPGRADED FROM %d TO %d\n",CurrentProtocolVersion,mc_gState->m_ProtocolVersionToUpgrade);
+/*            
+            if(mc_gState->m_ProtocolVersionToUpgrade != mc_gState->m_NetworkParams->ProtocolVersion())
+            {
+                LogPrintf("NODE IS UPGRADED FROM %d TO %d\n",mc_gState->m_NetworkParams->ProtocolVersion(),mc_gState->m_ProtocolVersionToUpgrade);
+            }        
+ */ 
+        }
+    }
+    else
+    {
+        mc_gState->m_ProtocolVersionToUpgrade=0;        
+    }
+    
+    return MC_ERR_NOERROR;
+}
+
+
+int MultichainNode_ApplyUpgrades_Old(int current_height)
 {
     mc_EntityDetails entity;
     mc_Buffer *permissions;
@@ -393,7 +545,10 @@ int MultichainNode_ApplyUpgrades(int current_height)
                         version=entity.UpgradeProtocolVersion();
                         if(version >= mc_gState->MinProtocolDowngradeVersion())
                         {
-                            NewProtocolVersion=version;
+                            if((NewProtocolVersion < mc_gState->MinProtocolForbiddenDowngradeVersion()) || (version >= NewProtocolVersion))
+                            {
+                                NewProtocolVersion=version;
+                            }
                         }
                     }
                 }
@@ -976,13 +1131,7 @@ bool IsStandardTx(const CTransaction& tx, string& reason,bool check_for_dust)
     }
 
     // only one OP_RETURN txout is permitted
-/* MCHN START */    
-    int max_op_returns=1;
-    if(mc_gState->m_Features->Streams())
-    {
-        max_op_returns=MCP_MAX_STD_OP_RETURN_COUNT;
-    }
-/* MCHN END */    
+    int max_op_returns=MCP_MAX_STD_OP_RETURN_COUNT;
     
     if ((int)nDataOut > max_op_returns) {
         reason = "multi-op-return";
@@ -1294,24 +1443,6 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
     uint256 hash = tx.GetHash();
     if (pool.exists(hash))
         return false;
-
-/* MCHN START */
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        if(!AcceptPermissionsAndCheckForDust(tx,false,reason))
-        {
-            return state.DoS(0,
-                             error("AcceptToMemoryPool: : AcceptPermissionsAndCheckForDust failed %s : %s", hash.ToString(),reason),
-                             REJECT_NONSTANDARD, reason);
-        }
-        if(!AcceptAssetGenesis(tx,-1,false,reason))
-        {
-            return state.DoS(0,
-                             error("AcceptToMemoryPool: : AcceptAssetGenesis failed %s : %s", hash.ToString(),reason),
-                             REJECT_INVALID, reason);
-        }
-    }    
-/* MCHN END */
     
     // Check for conflicts with in-memory transactions
     {
@@ -1323,7 +1454,8 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
         {
             if(fDebug)LogPrint("mchn","Conflicting with in-memory %s\n",tx.vin[i].ToString().c_str());
             // Disable replacement feature for now
-            return false;
+            return state.Invalid(error("AcceptToMemoryPool : Conflicting with in-memory tx"),
+                                 REJECT_DUPLICATE, "bad-txns-inputs-spent");
         }
     }
     }
@@ -1522,39 +1654,26 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
 /* MCHN START */
         
         uint32_t replay=0;
+        int64_t mandatory_fee;
         int permissions_from,permissions_to;
         permissions_from=mc_gState->m_Permissions->m_MempoolPermissions->GetCount();
         
-        if(mc_gState->m_Features->Streams())
+        if(!AcceptMultiChainTransaction(tx,view,-1,true,reason, &mandatory_fee, &replay))
         {
-            if(!AcceptMultiChainTransaction(tx,view,-1,true,reason, &replay))
-            {
-                return state.DoS(0,
-                                 error("AcceptToMemoryPool: : AcceptMultiChainTransaction failed %s : %s", hash.ToString(),reason),
-                                 REJECT_NONSTANDARD, reason);
-            }
+            return state.DoS(0,
+                             error("AcceptToMemoryPool: : AcceptMultiChainTransaction failed %s : %s", hash.ToString(),reason),
+                             REJECT_NONSTANDARD, reason);
         }
-        else
+        
+        if(mandatory_fee)
         {
-            if(!AcceptPermissionsAndCheckForDust(tx,true,reason))
-            {
-                return state.DoS(0,
-                                 error("AcceptToMemoryPool: : AcceptPermissionChanges failed when adding to permission db %s - %s", hash.ToString(),reason),
-                                 REJECT_INVALID, reason);
-            }
-            if(!AcceptAssetGenesis(tx,-1,true,reason))
-            {
-                return state.DoS(0,
-                                 error("AcceptToMemoryPool: : AcceptAssetGenesis failed when adding to asset db %s : %s", hash.ToString(),reason),
-                                 REJECT_INVALID, reason);
-            }        
-            if(!AcceptAssetTransfers(tx, view, reason))
-            {
-                return state.DoS(0,
-                                 error("AcceptToMemoryPool: : AcceptAssetTransfers failed %s : %s", hash.ToString(),reason),
-                                 REJECT_INVALID, reason);
-            }
+            txMinFee += mandatory_fee;
+            if (fLimitFree && nFees < txMinFee)
+                return state.DoS(0, error("AcceptToMemoryPool : not enough fees (including mandatory) %s, %d < %d",
+                                          hash.ToString(), nFees, txMinFee),
+                                 REJECT_INSUFFICIENTFEE, "insufficient fee");
         }
+        
         
         if(fAddToWallet)
         {
@@ -2225,6 +2344,15 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             return false;
     }
 
+    if(!CheckBlockForUpgardableConstraints(block,state,"maximum-block-size",true))
+    {
+        return false;
+    }
+    if(!CheckBlockForUpgardableConstraints(block,state,"maximum-block-sigops",true))
+    {
+        return false;
+    }
+    
 /* MCHN START */    
     uint256 block_hash;
     unsigned char miner_address[20];
@@ -2282,55 +2410,43 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         {
             const CTransaction &tx = block.vtx[i];
             string reason;
-            if(mc_gState->m_Features->Streams())
+            if(!AcceptMultiChainTransaction(tx,view,offset,true,reason,NULL,NULL))
             {
-                if(!AcceptMultiChainTransaction(tx,view,offset,true,reason,NULL))
-                {
-                    return state.DoS(100, error(reason.c_str()),
-                                 REJECT_INVALID, "bad-transaction");            
-                }
+                return state.DoS(100, error(reason.c_str()),
+                             REJECT_INVALID, "bad-transaction");            
+            }
 //                unsigned char *root_stream_name;
-                int root_stream_name_size;
-                mc_gState->m_NetworkParams->GetParam("rootstreamname",&root_stream_name_size);        
-                if(mc_gState->m_NetworkParams->IsProtocolMultichain() == 0)
+            int root_stream_name_size;
+            mc_gState->m_NetworkParams->GetParam("rootstreamname",&root_stream_name_size);        
+            if(mc_gState->m_NetworkParams->IsProtocolMultichain() == 0)
+            {
+                root_stream_name_size=0;
+            }    
+            if(root_stream_name_size > 1)
+            {
+                if(pwalletTxsMain)
                 {
-                    root_stream_name_size=0;
-                }    
-                if(root_stream_name_size > 1)
-                {
-                    if(pwalletTxsMain)
-                    {
-                        if(mc_gState->m_WalletMode & MC_WMD_TXS)
-                        {                        
-                            mc_TxEntity entity;
-                            uint256 genesis_hash=block.vtx[0].GetHash();
-                            entity.Zero();
+                    if(mc_gState->m_WalletMode & MC_WMD_TXS)
+                    {                        
+                        mc_TxEntity entity;
+                        uint256 genesis_hash=block.vtx[0].GetHash();
+                        entity.Zero();
 
-                            memcpy(entity.m_EntityID,(unsigned char*)&genesis_hash+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
-                            entity.m_EntityType=MC_TET_STREAM | MC_TET_CHAINPOS;
-                            pwalletTxsMain->AddEntity(&entity,0);
-                            entity.m_EntityType=MC_TET_STREAM | MC_TET_TIMERECEIVED;
-                            pwalletTxsMain->AddEntity(&entity,0);
-                            entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_CHAINPOS;
-                            pwalletTxsMain->AddEntity(&entity,0);
-                            entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_TIMERECEIVED;
-                            pwalletTxsMain->AddEntity(&entity,0);
-                            entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_CHAINPOS;
-                            pwalletTxsMain->AddEntity(&entity,0);
-                            entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_TIMERECEIVED;
-                            pwalletTxsMain->AddEntity(&entity,0);
-                        }
+                        memcpy(entity.m_EntityID,(unsigned char*)&genesis_hash+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
+                        entity.m_EntityType=MC_TET_STREAM | MC_TET_CHAINPOS;
+                        pwalletTxsMain->AddEntity(&entity,0);
+                        entity.m_EntityType=MC_TET_STREAM | MC_TET_TIMERECEIVED;
+                        pwalletTxsMain->AddEntity(&entity,0);
+                        entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_CHAINPOS;
+                        pwalletTxsMain->AddEntity(&entity,0);
+                        entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_TIMERECEIVED;
+                        pwalletTxsMain->AddEntity(&entity,0);
+                        entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_CHAINPOS;
+                        pwalletTxsMain->AddEntity(&entity,0);
+                        entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_TIMERECEIVED;
+                        pwalletTxsMain->AddEntity(&entity,0);
                     }
                 }
-            }
-            else
-            {
-                if(!AcceptPermissionsAndCheckForDust(tx,true,reason))
-                {
-                    return state.DoS(100, error(reason.c_str()),
-                                 REJECT_INVALID, "bad-transaction");            
-                    return false;
-                }            
             }
             offset+=tx.GetSerializeSize(SER_NETWORK,tx.nVersion);
         }
@@ -2453,35 +2569,11 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             string reason;
             if(!fJustCheck)
             {
-                if(mc_gState->m_Features->Streams())
+                if(!AcceptMultiChainTransaction(tx,view,offset,true,reason,NULL,NULL))
                 {
-                    if(!AcceptMultiChainTransaction(tx,view,offset,true,reason,NULL))
-                    {
-                        return state.DoS(0,
-                                         error("ConnectBlock: : AcceptMultiChainTransaction failed %s : %s", tx.GetHash().ToString(),reason),
-                                         REJECT_NONSTANDARD, reason);
-                    }
-                }
-                else
-                {
-                    if(!AcceptPermissionsAndCheckForDust(tx,true,reason))
-                    {
-                        return state.DoS(0,
-                                         error("ConnectBlock: AcceptPermissionChanges failed when adding to permission db %s - %s", tx.GetHash().ToString(),reason),
-                                         REJECT_INVALID, reason);
-                    }
-                    if(!AcceptAssetGenesis(tx,offset,true,reason))
-                    {
-                        return state.DoS(0,
-                                         error("ConnectBlock: AcceptAssetGenesis failed when adding to asset db %s : %s", tx.GetHash().ToString(),reason),
-                                         REJECT_INVALID, reason);
-                    }        
-                    if(!AcceptAssetTransfers(tx, view, reason))
-                    {
-                        return state.DoS(0,
-                                         error("ConnectBlock: AcceptAssetTransfers failed %s : %s", tx.GetHash().ToString(),reason),
-                                         REJECT_INVALID, reason);
-                    }
+                    return state.DoS(0,
+                                     error("ConnectBlock: : AcceptMultiChainTransaction failed %s : %s", tx.GetHash().ToString(),reason),
+                                     REJECT_NONSTANDARD, reason);
                 }
             }
 /* MCHN END */                    
@@ -2508,19 +2600,9 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             string reason;
             if(!fJustCheck)
             {
-                if(mc_gState->m_Features->Streams())
+                if(!AcceptMultiChainTransaction(tx,view,coinbase_offset,true,reason,NULL,NULL))
                 {
-                    if(!AcceptMultiChainTransaction(tx,view,coinbase_offset,true,reason,NULL))
-                    {
-                        return false;       
-                    }
-                }
-                else
-                {
-                    if(!AcceptPermissionsAndCheckForDust(tx,true,reason))
-                    {
-                        return false;
-                    }
+                    return false;       
                 }
             }
         }            
@@ -3258,8 +3340,11 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
         if(fDebug)LogPrint("mcblockperf","mchn-block-perf: Reaccepting wallet transactions\n");
         if(pwalletMain)
         {
-            pwalletMain->ReacceptWalletTransactions();                          // Some wallet transactions may become invalid in reorg            
+            if( (mc_gState->m_NodePausedState & MC_NPS_REACCEPT) == 0 )
+            {
+                pwalletMain->ReacceptWalletTransactions();                      // Some wallet transactions may become invalid in reorg            
                                                                                 // Some may become invalid if not confirmed in time
+            }
         }
         if(fDebug)LogPrint("mcblockperf","mchn-block-perf: Best chain activation completed\n");
 
@@ -3471,7 +3556,6 @@ string SetLastBlock(uint256 hash,bool *fNotFound)
 
         CBlockIndex *pindex;
         pindex=pblockindex;
-        
         while(pindex != pindexFork)
         {
             if (pblockindex->nStatus & BLOCK_FAILED_MASK)
@@ -3503,12 +3587,16 @@ string SetLastBlock(uint256 hash,bool *fNotFound)
             pindex=pindex->pprev;
         }
         
-        if(!ActivateBestChainStep(state,pblockindex,&block))
+        while(pblockindex != chainActive.Tip())
         {
-            string error=state.GetRejectReason();
-            ActivateBestChain(state);
-            return error;
-        }        
+            if(!ActivateBestChainStep(state,pblockindex,NULL))
+            {
+                string error=state.GetRejectReason();
+                ActivateBestChain(state);
+                return error;
+            }        
+        }
+        
         setBlockIndexCandidates.insert(pblockindex);
 
         LogPrintf("Set active chain tip: %s\n",hash.GetHex().c_str());
@@ -4046,6 +4134,34 @@ bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool f
 }
 
 /* MCHN START */
+
+bool CheckBlockForUpgardableConstraints(const CBlock& block, CValidationState& state, string parameter, bool in_sync)
+{
+    if(!in_sync)
+    {
+        return true;
+    }
+    
+    if(parameter == "maximum-block-size")
+    {
+        if (block.vtx.empty() || block.vtx.size() > MAX_BLOCK_SIZE || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > MAX_BLOCK_SIZE)
+            return state.DoS(100, error("CheckBlock() : size limits failed"),
+                             REJECT_INVALID, "bad-blk-length");        
+    }
+    if(parameter == "maximum-block-sigops")
+    {
+        unsigned int nSigOps = 0;
+        BOOST_FOREACH(const CTransaction& tx, block.vtx)
+        {
+            nSigOps += GetLegacySigOpCount(tx);
+        }
+        if (nSigOps > MAX_BLOCK_SIGOPS)
+            return state.DoS(100, error("CheckBlock() : out-of-bounds SigOpCount"),
+                             REJECT_INVALID, "bad-blk-sigops", true);        
+    }
+    return true;
+}
+
 //bool CheckBlock(CBlock& block, CValidationState& state, bool fCheckPOW, bool fCheckMerkleRoot)
 bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW, bool fCheckMerkleRoot)
 /* MCHN END */
@@ -4078,10 +4194,16 @@ bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW, bo
     // because we receive the wrong transactions for it.
 
     // Size limits
+    if(!CheckBlockForUpgardableConstraints(block,state,"maximum-block-size",false))
+    {
+        return false;
+    }
+/*    
     if (block.vtx.empty() || block.vtx.size() > MAX_BLOCK_SIZE || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > MAX_BLOCK_SIZE)
         return state.DoS(100, error("CheckBlock() : size limits failed"),
                          REJECT_INVALID, "bad-blk-length");
-
+*/
+    
     // First transaction must be coinbase, the rest must not be
     if (block.vtx.empty() || !block.vtx[0].IsCoinBase())
         return state.DoS(100, error("CheckBlock() : first tx is not coinbase"),
@@ -4111,7 +4233,12 @@ bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW, bo
         }
     }
     
+    if(!CheckBlockForUpgardableConstraints(block,state,"maximum-block-sigops",false))
+    {
+        return false;
+    }
     
+/*    
     unsigned int nSigOps = 0;
     BOOST_FOREACH(const CTransaction& tx, block.vtx)
     {
@@ -4120,7 +4247,7 @@ bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW, bo
     if (nSigOps > MAX_BLOCK_SIGOPS)
         return state.DoS(100, error("CheckBlock() : out-of-bounds SigOpCount"),
                          REJECT_INVALID, "bad-blk-sigops", true);
-
+*/
     return true;
 }
 
@@ -4152,7 +4279,7 @@ bool CheckBranchForInvalidBlocks(CBlockIndex * const pindexPrev)
 
 
 
-bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex * const pindexPrev)
+bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex * const pindexPrev, CBlockIndex *pindexChecked)
 {
     uint256 hash = block.GetHash();
     if (hash == Params().HashGenesisBlock())
@@ -4225,11 +4352,14 @@ bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& sta
             }
         }
     }
-    
-    if(!CheckBranchForInvalidBlocks(pindexPrev))
+
+    if(pindexChecked != pindexPrev)                                         
     {
-        return state.Invalid(error("%s : %s rejected - invalid branch", __func__,block.GetHash().ToString().c_str()),
-                             REJECT_INVALID, "reorg-invalid branch");                                
+        if(!CheckBranchForInvalidBlocks(pindexPrev))
+        {
+            return state.Invalid(error("%s : %s rejected - invalid branch", __func__,block.GetHash().ToString().c_str()),
+                                 REJECT_INVALID, "reorg-invalid branch");                                
+        }
     }
 
     
@@ -4282,7 +4412,7 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
     return true;
 }
 
-bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex** ppindex, int node_id)
+bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex** ppindex, int node_id, CBlockIndex *pindexChecked)
 {
     AssertLockHeld(cs_main);
     // Check for duplicate
@@ -4296,10 +4426,13 @@ bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBloc
             *ppindex = pindex;
         if (pindex->nStatus & BLOCK_FAILED_MASK)
             return state.Invalid(error("%s : block is marked invalid", __func__), 0, "duplicate");
-        if(!CheckBranchForInvalidBlocks(pindex->pprev))
+        if(pindexChecked != pindex->pprev)                                         
         {
-            return state.Invalid(error("%s : %s rejected - invalid branch", __func__,block.GetHash().ToString().c_str()),
-                                 REJECT_INVALID, "reorg-invalid branch");                                
+            if(!CheckBranchForInvalidBlocks(pindex->pprev))
+            {
+                return state.Invalid(error("%s : %s rejected - invalid branch", __func__,block.GetHash().ToString().c_str()),
+                                     REJECT_INVALID, "reorg-invalid branch");                                
+            }
         }
         return true;
     }
@@ -4318,7 +4451,7 @@ bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBloc
             return state.DoS(10, error("%s : prev block invalid", __func__), REJECT_INVALID, "bad-prevblk");// MCHN was 100 before, softened for reorgs due to mining diversity change
     }
 
-    if (!ContextualCheckBlockHeader(block, state, pindexPrev))
+    if (!ContextualCheckBlockHeader(block, state, pindexPrev, pindexChecked))
         return false;
 
     int successor=0;
@@ -5099,10 +5232,12 @@ bool LoadExternalBlockFile(FILE* fileIn, CDiskBlockPos *dbp)
     static std::multimap<uint256, CDiskBlockPos> mapBlocksUnknownParent;
     int64_t nStart = GetTimeMillis();
 
+    uint32_t effective_max_block_size=GetArg("-loadblockmaxsize",2*MAX_BLOCK_SIZE);
+    
     int nLoaded = 0;
     try {
         // This takes over fileIn and calls fclose() on it in the CBufferedFile destructor
-        CBufferedFile blkdat(fileIn, 2*MAX_BLOCK_SIZE, MAX_BLOCK_SIZE+8, SER_DISK, CLIENT_VERSION);
+        CBufferedFile blkdat(fileIn, 2*effective_max_block_size, effective_max_block_size+8, SER_DISK, CLIENT_VERSION);
         uint64_t nRewind = blkdat.GetPos();
         while (!blkdat.eof()) {
             boost::this_thread::interruption_point();
@@ -5685,6 +5820,24 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         return false;
     }
 
+    else if (strCommand == "offchain")
+    {
+        CValidationState state;        
+        if(pRelayManager)
+        {
+            if( (mc_gState->m_NodePausedState & MC_NPS_OFFCHAIN) == 0 )
+            {
+                if(!pRelayManager->ProcessRelay(pfrom,vRecv,state,MC_VRA_DEFAULT))
+                {
+                    int nDos = 0;
+                    if (state.IsInvalid(nDos) && nDos > 0)
+                    {
+                        Misbehaving(pfrom->GetId(), nDos);
+                    }
+                }
+            }
+        }
+    }
 
     else if (strCommand == "verack")
     {
@@ -6223,7 +6376,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                 Misbehaving(pfrom->GetId(), 20);
                 return error("non-continuous headers sequence");
             }
-            if (!AcceptBlockHeader(header, state, &pindexLast, pfrom->GetId())) {
+            if (!AcceptBlockHeader(header, state, &pindexLast, pfrom->GetId(),pindexLast)) {
                 int nDoS;
                 if (state.IsInvalid(nDoS)) {
                     if (nDoS > 0)
@@ -7186,6 +7339,23 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
 /* MCHN START */        
         }
         pto->fLastIgnoreIncoming=ignore_incoming;
+        
+        if(pwalletTxsMain->m_ChunkCollector)
+        {
+            int64_t time_millis_now=GetTimeMillis();
+
+            if(pwalletTxsMain->m_ChunkCollector->m_NextTryTimestamp < time_millis_now)
+            {
+                if(MultichainNode_CollectChunks())
+                {
+                    MultichainCollectChunks(pwalletTxsMain->m_ChunkCollector);
+                }                
+                pwalletTxsMain->m_ChunkCollector->m_NextTryTimestamp=time_millis_now+MultichainCollectChunksQueueStats(pwalletTxsMain->m_ChunkCollector);
+                
+//                    if(fDebug)LogPrint("chunks", "Chunks to collect: %d\n", still_to_collect);
+//                pwalletTxsMain->m_ChunkCollector->m_NextTryTimestamp=time_millis_now+GetArg("-offchainrequestfreq",MC_CCW_TIMEOUT_BETWEEN_COLLECTS_MILLIS);
+            }
+        }
 /* MCHN END */                
     }
     return true;

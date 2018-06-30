@@ -179,6 +179,7 @@ private:
     int nMaxAssetsPerGroup;
     int nOptimalGroupCount;
     int nMode;
+    int nSingleAssetGroupCount;
     void Clear();
     void Destroy();
     
@@ -187,6 +188,7 @@ private:
     int *lpTmpGroupBuffer;
     
     CAssetGroup *FindAndShiftBestGroup(int assets);
+    CAssetGroup *AddSingleAssetGroup(unsigned char *assetRef);
     
 public:
     
@@ -384,7 +386,7 @@ public:
 /* MCHN START */    
 //    void AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed=true, const CCoinControl *coinControl = NULL) const;
     void AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed=true, const CCoinControl *coinControl = NULL, bool fOnlyUnlocked=true, 
-                        bool fOnlyCoinsNoTxs=false, uint160 addr=0, uint32_t flags=MC_CSF_ALLOW_SPENDABLE_P2SH) const;
+                        bool fOnlyCoinsNoTxs=false, uint160 addr=0, const std::set<uint160>* addresses=NULL, uint32_t flags=MC_CSF_ALLOW_SPENDABLE_P2SH) const;
 /* MCHN END */    
     bool SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int nConfTheirs, std::vector<COutput> vCoins, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet) const;
 
@@ -459,7 +461,7 @@ public:
     void SyncTransaction(const CTransaction& tx, const CBlock* pblock);
     bool AddToWalletIfInvolvingMe(const CTransaction& tx, const CBlock* pblock, bool fUpdate);
     void EraseFromWallet(const uint256 &hash);
-    int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false, bool fOnlyUnsynced = false);
+    int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false, bool fOnlyUnsynced = false,bool fOnlySubscriptions = false);
     void ReacceptWalletTransactions();
     void ResendWalletTransactions(bool fForce = false);
     CAmount GetBalance() const;

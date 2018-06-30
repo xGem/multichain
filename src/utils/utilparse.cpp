@@ -27,6 +27,100 @@ const unsigned char* GetAddressIDPtr(const CTxDestination& address)
     return aptr;
 }
 
+bool mc_ExtractOutputAssetQuantities(mc_Buffer *assets,string& reason,bool with_followons)
+{
+    int err;
+    uint32_t script_type=MC_SCR_ASSET_SCRIPT_TYPE_TRANSFER;
+    if(with_followons)
+    {        
+        script_type |= MC_SCR_ASSET_SCRIPT_TYPE_FOLLOWON;
+    }
+    for (int e = 0; e < mc_gState->m_TmpScript->GetNumElements(); e++)
+    {
+        mc_gState->m_TmpScript->SetElement(e);
+        err=mc_gState->m_TmpScript->GetAssetQuantities(assets,script_type);
+        if((err != MC_ERR_NOERROR) && (err != MC_ERR_WRONG_SCRIPT))
+        {
+            reason="Asset transfer script rejected - error in output transfer script";
+            return false;                                
+        }
+    }
+
+    return true;
+}
+
+bool mc_VerifyAssetPermissions(mc_Buffer *assets, vector<CTxDestination> addressRets, int required_permissions, uint32_t permission, string& reason)
+{
+    mc_EntityDetails entity;
+    int asset_count=-1;
+    
+    for(int i=0;i<assets->GetCount();i++)
+    {
+        if(mc_gState->m_Assets->FindEntityByFullRef(&entity,assets->GetRow(i)))
+        {
+            if( entity.Permissions() & (MC_PTP_SEND | MC_PTP_RECEIVE) )
+            {
+                if( (addressRets.size() != 1) || (required_permissions > 1) )
+                {
+                    reason="Sending restricted asset to non-standard and multisig addresses not allowed";
+                    return false;                                                    
+                }
+                if(assets->GetCount() > 1)
+                {
+                    if(asset_count < 0)
+                    {
+                        asset_count=0;
+                        for(int j=0;j<assets->GetCount();j++)
+                        {
+                            if(mc_GetABRefType(assets->GetRow(j)) != MC_AST_ASSET_REF_TYPE_SPECIAL)
+                            {
+                                asset_count++;
+                            }                            
+                        }
+                    }
+                    if(asset_count > 1)
+                    {
+                        if(permission == MC_PTP_SEND)
+                        {
+                            reason="One of multiple assets in input has per-asset permissions";
+                        }
+                        if(permission == MC_PTP_RECEIVE)
+                        {
+                            reason="One of multiple assets in output has per-asset permissions";
+                        }
+                        return false;                                
+                    }
+                }
+                if(entity.Permissions() & permission)
+                {
+                    int found=required_permissions;
+                    for(int j=0;j<(int)addressRets.size();j++)
+                    {
+                        if(mc_gState->m_Permissions->GetPermission(entity.GetTxID(),GetAddressIDPtr(addressRets[j]),permission))
+                        {
+                            found--;
+                        }
+                    }
+                    if(found > 0)
+                    {
+                        if(permission == MC_PTP_SEND)
+                        {
+                            reason="One of the inputs doesn't have per-asset send permission";
+                        }
+                        if(permission == MC_PTP_RECEIVE)
+                        {
+                            reason="One of the outputs doesn't have per-asset receive permission";
+                        }                    
+                        return false;                                
+                    }
+                }
+            }
+        }        
+    }
+    
+    return true;
+}
+
 
 /* 
  * Parses txout script into asset-quantity buffer
@@ -149,41 +243,27 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                         *allowed -= MC_PTP_SEND;                        
                     }
                     
-                    if((mc_gState->m_Features->ShortTxIDInTx() == 0) && (entity.IsUnconfirmedGenesis() != 0) )
+                    memcpy(buf,entity.GetFullRef(),MC_AST_ASSET_FULLREF_SIZE);
+                    row=amounts->Seek(buf);
+                    last=0;
+                    if(row >= 0)
                     {
-                        if(required)                                            // Unconfirmed genesis in protocol < 10007, cannot be spent
-                        {
-                            memset(buf,0,MC_AST_ASSET_FULLREF_SIZE);
-                            mc_SetABRefType(buf,MC_AST_ASSET_REF_TYPE_GENESIS);
-                            mc_SetABQuantity(buf,total);
-                            amounts->Add(buf);        
-                            *required |= MC_PTP_ISSUE;
-                        }
+                        last=mc_GetABQuantity(amounts->GetRow(row));
+                        total+=last;
+                        mc_SetABQuantity(amounts->GetRow(row),total);
                     }
-                    else            
+                    else
                     {
-                        memcpy(buf,entity.GetFullRef(),MC_AST_ASSET_FULLREF_SIZE);
-                        row=amounts->Seek(buf);
-                        last=0;
-                        if(row >= 0)
+                        mc_SetABQuantity(buf,total);
+                        amounts->Add(buf);                        
+                    }
+
+                    if(required)
+                    {
+                        if(expected_required == 0)                          
                         {
-                            last=mc_GetABQuantity(amounts->GetRow(row));
-                            total+=last;
-                            mc_SetABQuantity(amounts->GetRow(row),total);
-                        }
-                        else
-                        {
-                            mc_SetABQuantity(buf,total);
-                            amounts->Add(buf);                        
-                        }
-                        
-                        if(required)
-                        {
-                            if(expected_required == 0)                          
-                            {
-                                *required |= MC_PTP_ISSUE;
-                            }                            
-                        }
+                            *required |= MC_PTP_ISSUE;
+                        }                            
                     }
                 }                
                 else                                                            // Asset not found, no error but the caller should check required field
@@ -357,14 +437,6 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                                         }                                    
                                     }
                                 }
-                                else
-                                {
-                                    if(mc_gState->m_Features->OpDropDetailsScripts() == 0)// May be Follow-on details from v10007
-                                    {
-                                        strFailReason="Invalid publish script, not stream";
-                                        return false;                                                                    
-                                    }
-                                }                            
                             }                        
                             else
                             {
@@ -418,13 +490,10 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                         *required |= admin_type;
                         if( type & (MC_PTP_ADMIN | MC_PTP_MINE) )
                         {
-                            if(mc_gState->m_Features->CachedInputScript())
+                            if(mc_gState->m_NetworkParams->GetInt64Param("supportminerprecheck"))                                
                             {
-                                if(mc_gState->m_NetworkParams->GetInt64Param("supportminerprecheck"))                                
-                                {
-                                    *required |= MC_PTP_CACHED_SCRIPT_REQUIRED;
-                                }        
-                            }
+                                *required |= MC_PTP_CACHED_SCRIPT_REQUIRED;
+                            }        
                         }
                         
                         if(hash == 0)

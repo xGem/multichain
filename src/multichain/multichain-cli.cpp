@@ -28,6 +28,7 @@ using namespace json_spirit;
 
 static const int CONTINUE_EXECUTION=-1;
 extern unsigned int JSON_NO_DOUBLE_FORMATTING;  
+extern int JSON_DOUBLE_DECIMAL_DIGITS;                             
 
 std::string HelpMessageCli()
 {
@@ -36,7 +37,7 @@ std::string HelpMessageCli()
     strUsage += "  -?                       " + _("This help message") + "\n";
     strUsage += "  -conf=<file>             " + strprintf(_("Specify configuration file (default: %s)"), "multichain.conf") + "\n";
     strUsage += "  -datadir=<dir>           " + _("Specify data directory") + "\n";
-    strUsage += "  -cold=<dir>              " + _("Connect to multichaind-cold: use multichaind-cold default directory if -datadir is not set") + "\n";
+    strUsage += "  -cold                    " + _("Connect to multichaind-cold: use multichaind-cold default directory if -datadir is not set") + "\n";
 /* MCHN START */    
     strUsage += "  -requestout=<requestout> " + _("Send request to stderr, stdout or null (not print it at all), default stderr") + "\n"; 
     strUsage += "  -saveclilog=<n>          " + _("If <n>=0 multichain-cli history is not saved, default 1") + "\n";
@@ -239,9 +240,10 @@ Object CallRPC(const string& strMethod, const Array& params)
     map<string, string> mapRequestHeaders;
     mapRequestHeaders["Authorization"] = string("Basic ") + strUserPass64;
     // Send request
-    JSON_NO_DOUBLE_FORMATTING=1;    
+//    JSON_NO_DOUBLE_FORMATTING=1;    
     string strRequest = JSONRPCRequest(strMethod, params, 1);
-    JSON_NO_DOUBLE_FORMATTING=0;    
+//    JSON_NO_DOUBLE_FORMATTING=0;    
+    JSON_DOUBLE_DECIMAL_DIGITS=GetArg("-apidecimaldigits",-1);        
     string strPost = HTTPPost(strRequest, mapRequestHeaders);
     stream << strPost << std::flush;
 

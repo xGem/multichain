@@ -47,6 +47,7 @@
 #include "structs/hash.h"
 #include "core/main.h"
 #include "net/net.h"
+#include "custom/custom.h"
 
 #define MC_DCT_SEED_NODE_MAX_SIZE 32
 
@@ -76,6 +77,8 @@ void mc_Params::Parse(int argc, const char* const argv[],int exe_type)
     int i,length;
     ParseParameters(argc,argv);
     mc_ExpandDataDirParam();
+    
+    custom_set_runtime_defaults(exe_type);
     
     m_NumArguments=0;
     length=MC_DCT_SEED_NODE_MAX_SIZE+1;
@@ -141,25 +144,28 @@ void mc_Params::Parse(int argc, const char* const argv[],int exe_type)
                     int err;
                     const char *seed_node;
 
-                    mapConfig=new mc_MapStringString;
-
-                    err=mc_ReadGeneralConfigFile(mapConfig,mc_gState->m_Params->NetworkName(),"seed",".dat");
-
-                    if(err == MC_ERR_NOERROR)
+                    if(!GetBoolArg("-addnodeonly",false))
                     {
-                        seed_node=mapConfig->Get("seed");
+                        mapConfig=new mc_MapStringString;
 
-                        if(seed_node)
+                        err=mc_ReadGeneralConfigFile(mapConfig,mc_gState->m_Params->NetworkName(),"seed",".dat");
+
+                        if(err == MC_ERR_NOERROR)
                         {
-                            if(strlen(seed_node) <= MC_DCT_SEED_NODE_MAX_SIZE)
+                            seed_node=mapConfig->Get("seed");
+
+                            if(seed_node)
                             {
-                                strcpy(m_Arguments[m_NumArguments],seed_node);
-                                length+=strlen(seed_node);
+                                if(strlen(seed_node) <= MC_DCT_SEED_NODE_MAX_SIZE)
+                                {
+                                    strcpy(m_Arguments[m_NumArguments],seed_node);
+                                    length+=strlen(seed_node);
+                                }
                             }
                         }
-                    }
 
-                    delete mapConfig;                            
+                        delete mapConfig;                            
+                    }
                     m_NumArguments++;                                                                
                 }                
             }            
@@ -384,6 +390,11 @@ const boost::filesystem::path mc_GetDataDir(const char *network_name,int create)
     return path;
 }
 
+void mc_CreateDir(const char *dir_name)
+{
+    boost::filesystem::create_directories(boost::filesystem::path(dir_name));    
+}
+
 void mc_RemoveDataDir(const char *network_name)
 {
     boost::filesystem::path path;
@@ -493,7 +504,7 @@ FILE *mc_OpenFile(const char *network_name,const char *filename, const char *ext
 
 int mc_RemoveFile(const char *network_name,const char *filename, const char *extension,int options)        
 {    
-    return unlink(mc_GetFullFileName(network_name,filename,extension,options).c_str()); 
+    return __US_DeleteFile(mc_GetFullFileName(network_name,filename,extension,options).c_str()); 
 }
 
 
@@ -715,6 +726,9 @@ int mc_BuildDescription(int build, char *desc)
         case 2:
             sprintf(desc+strlen(desc)," beta ");
             break;
+        case 7:
+            sprintf(desc+strlen(desc)," build ");
+            break;
         case 9:
             if(c[4] != 1)return MC_ERR_INVALID_PARAMETER_VALUE;
             break;
@@ -726,6 +740,26 @@ int mc_BuildDescription(int build, char *desc)
         sprintf(desc+strlen(desc),"%d",c[4]);        
     }
     
+    return MC_ERR_NOERROR;
+}
+
+
+int mc_MultichainParams::SetProtocolGlobals()
+{
+    MCP_ALLOW_ARBITRARY_OUTPUTS=1; 
+    if(mc_gState->m_Features->FixedDestinationExtraction() != 0)
+    {
+        int aao=mc_gState->m_NetworkParams->GetInt64Param("allowarbitraryoutputs");
+        if(aao>=0)
+        {
+            MCP_ALLOW_ARBITRARY_OUTPUTS=aao;
+        }
+    }    
+    if(mc_gState->m_Features->ParameterUpgrades())
+    {
+        MAX_BLOCK_SIGOPS = MAX_BLOCK_SIZE/50;
+        MAX_TX_SIGOPS = MAX_BLOCK_SIGOPS/5;
+    }
     return MC_ERR_NOERROR;
 }
 
@@ -743,9 +777,12 @@ int mc_MultichainParams::SetGlobals()
     m_ProtocolVersion=ProtocolVersion();
     
     MIN_RELAY_TX_FEE=(unsigned int)GetInt64Param("minimumrelayfee");    
+    MIN_OFFCHAIN_FEE=(unsigned int)GetInt64Param("minimumoffchainfee");    
     MAX_OP_RETURN_RELAY=(unsigned int)GetInt64Param("maxstdopreturnsize");    
     MAX_OP_RETURN_RELAY=GetArg("-datacarriersize", MAX_OP_RETURN_RELAY);
     MAX_BLOCK_SIZE=(unsigned int)GetInt64Param("maximumblocksize");    
+    MAX_CHUNK_SIZE=(unsigned int)GetInt64Param("maximumchunksize");    
+    MAX_CHUNK_COUNT=(unsigned int)GetInt64Param("maximumchunkcount");    
     DEFAULT_BLOCK_MAX_SIZE=MAX_BLOCK_SIZE;    
     while(MAX_BLOCK_SIZE>MAX_BLOCKFILE_SIZE)
     {
@@ -755,6 +792,11 @@ int mc_MultichainParams::SetGlobals()
     {
         MAX_SIZE *= 2;
     }
+    while(MAX_CHUNK_SIZE+OFFCHAIN_MSG_PADDING>MAX_SIZE)
+    {
+        MAX_SIZE *= 2;
+    }
+    MIN_BLOCKS_BETWEEN_UPGRADES=(unsigned int)GetInt64Param("timingupgrademingap"); 
     MAX_STANDARD_TX_SIZE=(unsigned int)GetInt64Param("maxstdtxsize");    
     MAX_SCRIPT_ELEMENT_SIZE=(unsigned int)GetInt64Param("maxstdelementsize");
     COINBASE_MATURITY=(int)GetInt64Param("rewardspendabledelay");    
@@ -767,12 +809,6 @@ int mc_MultichainParams::SetGlobals()
         CENT=0;
         MAX_MONEY=0;
     }
-    
-    if(mc_gState->m_Features->ShortTxIDInTx() == 0)
-    {
-        m_AssetRefSize=MC_AST_ASSET_REF_SIZE;
-    }
-    
     MCP_MAX_STD_OP_RETURN_COUNT=mc_gState->m_NetworkParams->GetInt64Param("maxstdopreturnscount");
     MCP_INITIAL_BLOCK_REWARD=mc_gState->m_NetworkParams->GetInt64Param("initialblockreward");
     MCP_FIRST_BLOCK_REWARD=mc_gState->m_NetworkParams->GetInt64Param("firstblockreward");
@@ -782,17 +818,17 @@ int mc_MultichainParams::SetGlobals()
     MCP_ANYONE_CAN_CONNECT=mc_gState->m_NetworkParams->GetInt64Param("anyonecanconnect");
     MCP_ANYONE_CAN_SEND=mc_gState->m_NetworkParams->GetInt64Param("anyonecansend");
     MCP_ANYONE_CAN_RECEIVE=mc_gState->m_NetworkParams->GetInt64Param("anyonecanreceive");
+    MCP_ANYONE_CAN_CREATE=mc_gState->m_NetworkParams->GetInt64Param("anyonecancreate");
+    MCP_ANYONE_CAN_ISSUE=mc_gState->m_NetworkParams->GetInt64Param("anyonecanissue");    
     MCP_ANYONE_CAN_ACTIVATE=mc_gState->m_NetworkParams->GetInt64Param("anyonecanactivate");
-    MCP_MINIMUM_PER_OUTPUT=mc_gState->m_NetworkParams->GetInt64Param("minimumperoutput");
-    MCP_ALLOW_ARBITRARY_OUTPUTS=1; 
-    if(mc_gState->m_Features->FixedDestinationExtraction() != 0)
+    if(mc_gState->m_Features->FixedIn1001120003())
     {
-        int aao=mc_gState->m_NetworkParams->GetInt64Param("allowarbitraryoutputs");
-        if(aao>=0)
-        {
-            MCP_ALLOW_ARBITRARY_OUTPUTS=aao;
-        }
+        if(MCP_ANYONE_CAN_ADMIN)MCP_ANYONE_CAN_SEND=1;
+        if(MCP_ANYONE_CAN_ACTIVATE)MCP_ANYONE_CAN_SEND=1;
+        if(MCP_ANYONE_CAN_CREATE)MCP_ANYONE_CAN_SEND=1;
+        if(MCP_ANYONE_CAN_ISSUE)MCP_ANYONE_CAN_SEND=1;
     }
+    MCP_MINIMUM_PER_OUTPUT=mc_gState->m_NetworkParams->GetInt64Param("minimumperoutput");
     MCP_ALLOW_MULTISIG_OUTPUTS=mc_gState->m_NetworkParams->GetInt64Param("allowmultisigoutputs");
     MCP_ALLOW_P2SH_OUTPUTS=mc_gState->m_NetworkParams->GetInt64Param("allowp2shoutputs");
     MCP_WITH_NATIVE_CURRENCY=0;
@@ -803,7 +839,7 @@ int mc_MultichainParams::SetGlobals()
     MCP_STD_OP_DROP_COUNT=mc_gState->m_NetworkParams->GetInt64Param("maxstdopdropscount");
     MCP_STD_OP_DROP_SIZE=mc_gState->m_NetworkParams->GetInt64Param("maxstdopdropsize");
     MCP_ANYONE_CAN_RECEIVE_EMPTY=mc_gState->m_NetworkParams->GetInt64Param("anyonecanreceiveempty");
-    return MC_ERR_NOERROR;
+    return SetProtocolGlobals();
 }
 
 
@@ -843,6 +879,16 @@ void mc_SHA256::GetHash(unsigned char *hash)
     {
         ((CSHA256*)m_HashObject)->Finalize(hash);
     }        
+}
+
+void mc_SHA256::DoubleHash(const void *lpData,int size,void *hash)
+{
+    Reset();
+    Write(lpData,size);
+    GetHash((unsigned char *)hash);
+    Reset();
+    Write((unsigned char *)hash,32);
+    GetHash((unsigned char *)hash);    
 }
 
 int mc_MultichainParams::Import(const char *name,const char *source_address)

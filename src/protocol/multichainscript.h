@@ -29,6 +29,7 @@ typedef struct mc_Script
     int m_AllocElements;
     int m_AllocSize;
     int m_ScriptType;
+    uint32_t m_Restrictions;
     
     mc_Script()
     {
@@ -99,10 +100,20 @@ typedef struct mc_Script
     int GetCachedScript(int offset, int *next_offset, int* vin, unsigned char** script, int *script_size);
     int SetCachedScript(int offset, int *next_offset, int vin, unsigned char* script, int script_size);
 
+    int GetRawData(unsigned char **data,int *size);
+    int SetRawData(const unsigned char *data,const int size);
+    
     int GetDataFormat(uint32_t *format);
     int SetDataFormat(const uint32_t format);
     
+    int GetChunkDef(uint32_t *format,unsigned char** hashes,int *chunk_count,int64_t *total_size);
+    int GetChunkDef(uint32_t *format,unsigned char** hashes,int *chunk_count,int64_t *total_size,int check_sizes);
+    int SetChunkDefHeader(const uint32_t format,int chunk_count);
+    int SetChunkDefHash(unsigned char *hash,int size);
+    
     int ExtractAndDeleteDataFormat(uint32_t *format);
+    int ExtractAndDeleteDataFormat(uint32_t *format,unsigned char** hashes,int *chunk_count,int64_t *total_size);
+    int ExtractAndDeleteDataFormat(uint32_t *format,unsigned char** hashes,int *chunk_count,int64_t *total_size,int check_sizes);
     int DeleteDuplicatesInRange(int from,int to);
     
     

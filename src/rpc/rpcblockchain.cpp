@@ -30,9 +30,11 @@ vector<int> ParseBlockSetIdentifier(Value blockset_identifier);
 bool CreateAssetBalanceList(const CTxOut& out,mc_Buffer *amounts,mc_Script *lpScript);
 Object AssetEntry(const unsigned char *txid,int64_t quantity,uint32_t output_level);
 Array PermissionEntries(const CTxOut& txout,mc_Script *lpScript,bool fLong);
+Array PerOutputDataEntries(const CTxOut& txout,mc_Script *lpScript,uint256 txid,int vout);
 string EncodeHexTx(const CTransaction& tx);
 int OrphanPoolSize();
 bool paramtobool(Value param);
+bool StringToInt(string str,int *value);
 /* MCHN END */
 
 void ScriptPubKeyToJSON(const CScript& scriptPubKey, Object& out, bool fIncludeHex);
@@ -396,7 +398,13 @@ Value getblock(const Array& params, bool fHelp)
     std::string strHash = params[0].get_str();
     if(strHash.size() < 64)
     {
-        int nHeight = atoi(params[0].get_str().c_str());
+        int nHeight;
+        if(!StringToInt(params[0].get_str(),&nHeight))
+        {
+            throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block height should be integer");
+        }
+        
+//        int nHeight = atoi(params[0].get_str().c_str());
         if (nHeight < 0 || nHeight > chainActive.Height())
             throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block height out of range");
 
@@ -514,12 +522,10 @@ Value gettxout(const Array& params, bool fHelp)
     
 /* MCHN START */        
 
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);    
-    
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+       
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();
     
     asset_amounts->Clear();
     CTxOut txout=coins.vout[n];
@@ -556,11 +562,21 @@ Value gettxout(const Array& params, bool fHelp)
             assets.push_back(asset_entry);
         }
 
-        ret.push_back(Pair("assets", assets));
+        if( (assets.size() > 0) || (mc_gState->m_Compatibility & MC_VCM_1_0) )
+        {
+            ret.push_back(Pair("assets", assets));
+        }
     }
     Array permissions=PermissionEntries(txout,lpScript,false);
-    ret.push_back(Pair("permissions", permissions));
-    
+    if( (permissions.size() > 0) || (mc_gState->m_Compatibility & MC_VCM_1_0) )
+    {
+        ret.push_back(Pair("permissions", permissions));
+    }
+    Array data=PerOutputDataEntries(txout,lpScript,hash,n);
+    if(data.size())
+    {
+        ret.push_back(Pair("data", data));
+    }
 /* MCHN END */        
 
     return ret;
@@ -602,6 +618,38 @@ Value getblockchaininfo(const Array& params, bool fHelp)
     obj.push_back(Pair("difficulty",            (double)GetDifficulty()));
     obj.push_back(Pair("verificationprogress",  Checkpoints::GuessVerificationProgress(chainActive.Tip())));
     obj.push_back(Pair("chainwork",             chainActive.Tip()->nChainWork.GetHex()));
+        
+    
+    double chain_balance=0.;
+    if(COIN)
+    {
+        int chain_height=(int)chainActive.Height();
+        int64_t epoch_size=Params().SubsidyHalvingInterval();
+        int complete_epochs=chain_height / epoch_size;
+        int blocks_in_this_epoch=chain_height%epoch_size+1;
+        int64_t total_value=0;
+        int64_t epoch_value=MCP_INITIAL_BLOCK_REWARD;
+        for(int epoch=0;epoch<complete_epochs;epoch++)
+        {
+            total_value+=epoch_value*epoch_size;
+            epoch_value >>= 1;
+        }
+        total_value+=epoch_value*(int64_t)blocks_in_this_epoch;
+        if(chain_height >= 0)
+        {
+            total_value-=MCP_INITIAL_BLOCK_REWARD;                                      // Genesis block reward is unspendable
+        }
+        if(MCP_FIRST_BLOCK_REWARD >= 0)
+        {
+            if(chain_height >= 1)
+            {
+                total_value+=MCP_FIRST_BLOCK_REWARD-MCP_INITIAL_BLOCK_REWARD;
+            }
+        }
+        chain_balance=(double)total_value/(double)COIN;
+    }
+    obj.push_back(Pair("chainrewards",             chain_balance));
+    
     return obj;
 }
 

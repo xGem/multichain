@@ -179,6 +179,8 @@ libbitcoin_server_a_SOURCES = \
   core/main.cpp \
   protocol/multichaintx.cpp \
   protocol/multichainblock.cpp \
+  custom/custom_server.cpp \
+  protocol/relay.cpp \
   protocol/handshake.cpp \
   chain/merkleblock.cpp \
   miner/miner.cpp \
@@ -190,6 +192,9 @@ libbitcoin_server_a_SOURCES = \
   json/json_spirit_ubjson.cpp \
   rpc/rpcrawdata.cpp \
   rpc/rpcutils.cpp \
+  rpc/rpccache.cpp \
+  rpc/rpcchunks.cpp \
+  rpc/rpcdebug.cpp \
   rpc/rpchelp.cpp \
   rpc/rpcblockchain.cpp \
   rpc/rpcmining.cpp \
@@ -252,10 +257,14 @@ multichain_libbitcoin_multichain_a_SOURCES = \
   utils/tools.cpp \
   utils/utilwrapper.cpp \
   version/version.cpp \
+  custom/custom.cpp \
+  custom/custom_multichain.cpp \
   chainparams/params.cpp \
   protocol/multichainscript.cpp \
   utils/dbwrapper.cpp \
   wallet/wallettxdb.cpp \
+  wallet/chunkdb.cpp \
+  wallet/chunkcollector.cpp \
   permissions/permission.cpp \
   entities/asset.cpp
 
@@ -513,10 +522,14 @@ libbitcoinconsensus_la_SOURCES = \
   utils/utilwrapper.cpp \
   chainparams/buildgenesis.cpp \
   version/version.cpp \
+  custom/custom.cpp \
+  custom/custom_multichain.cpp \
   chainparams/chainparams.cpp \
   protocol/multichainscript.cpp \
   utils/dbwrapper.cpp \
   wallet/wallettxdb.cpp \
+  wallet/chunkdb.cpp \
+  wallet/chunkcollector.cpp \
   permissions/permission.cpp \
   entities/asset.cpp \
   structs/hash.cpp \

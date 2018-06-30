@@ -177,6 +177,10 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
     Array aMetaData;
     Array aItems;
     uint32_t format;
+    unsigned char *chunk_hashes;
+    int chunk_count;   
+    int64_t total_chunk_size,out_size;
+    uint32_t retrieve_status;
     Array aFormatMetaData;
     vector<Array> aFormatMetaDataPerOutput;
 
@@ -248,18 +252,19 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
             lpScript->Clear();
             lpScript->SetScript((unsigned char*)(&pc2[0]),(size_t)(script2.end()-pc2),MC_SCR_TYPE_SCRIPTPUBKEY);
             
-        	lpScript->ExtractAndDeleteDataFormat(&format);
+//        	lpScript->ExtractAndDeleteDataFormat(&format);
+            lpScript->ExtractAndDeleteDataFormat(&format,&chunk_hashes,&chunk_count,&total_chunk_size);
             
-            size_t elem_size;
             const unsigned char *elem;
 
             if(lpScript->GetNumElements()<=1)
             {
                 if(lpScript->GetNumElements()==1)
                 {
-                    elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
+//                    elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
 //                    aMetaData.push_back(OpReturnEntry(elem,elem_size,wtx.GetHash(),i));
-                    Value metadata=OpReturnFormatEntry(elem,elem_size,wtx.GetHash(),i,format,NULL);
+                    retrieve_status = GetFormattedData(lpScript,&elem,&out_size,chunk_hashes,chunk_count,total_chunk_size);
+                    Value metadata=OpReturnFormatEntry(elem,out_size,wtx.GetHash(),i,format,NULL,retrieve_status);
                     aFormatMetaData.push_back(metadata);
                     aFormatMetaDataPerOutput[i].push_back(metadata);
                 }                        
@@ -268,11 +273,12 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
             {
                 if(mc_gState->m_Compatibility & MC_VCM_1_0)
                 {
-                    elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
-                    if(elem_size)
+//                    elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
+                    retrieve_status = GetFormattedData(lpScript,&elem,&out_size,chunk_hashes,chunk_count,total_chunk_size);
+                    if(out_size)
                     {
     //                    aMetaData.push_back(OpReturnEntry(elem,elem_size,wtx.GetHash(),i));
-                        aFormatMetaData.push_back(OpReturnFormatEntry(elem,elem_size,wtx.GetHash(),i,format,NULL));
+                        aFormatMetaData.push_back(OpReturnFormatEntry(elem,out_size,wtx.GetHash(),i,format,NULL,retrieve_status));
                     }
                 }
                 
@@ -497,16 +503,14 @@ Value listwallettransactions(const Array& params, bool fHelp)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Negative from");
 
     
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();    
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
     
     Array ret;
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
@@ -574,11 +578,6 @@ Value listwallettransactions(const Array& params, bool fHelp)
     }
 
     
-    delete lpScript;
-    delete asset_amounts;
-    delete entity_rows;
-    
-    
     return ret;
 }
 
@@ -605,12 +604,11 @@ Value listaddresstransactions(const Array& params, bool fHelp)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Negative from");
 
     
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();    
     
     vector<CTxDestination> fromaddresses;        
     
@@ -639,10 +637,9 @@ Value listaddresstransactions(const Array& params, bool fHelp)
     }
     
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
-    
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
+
     Array ret;
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
@@ -712,11 +709,6 @@ Value listaddresstransactions(const Array& params, bool fHelp)
         std::reverse(ret.begin(), ret.end()); // Return oldest to newest
     }
     
-    delete lpScript;
-    delete asset_amounts;
-    delete entity_rows;
-    
-    
     return ret;
 }
 
@@ -750,12 +742,11 @@ Value getwallettransaction(const Array& params, bool fHelp)
             throw JSONRPCError(RPC_TX_NOT_FOUND, "Invalid or non-wallet transaction id");
     }
 
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();
     
     Object entry;
     
@@ -770,9 +761,6 @@ Value getwallettransaction(const Array& params, bool fHelp)
         entry=ListWalletTransactions(wtx,fLong,filter,NULL,asset_amounts,lpScript);
     }
         
-    delete lpScript;
-    delete asset_amounts;
-    
     if(entry.size() == 0)
     {
         throw JSONRPCError(RPC_TX_NOT_FOUND, "Wallet addresses with specified criteria are not involved in transaction");                                
@@ -809,12 +797,11 @@ Value getaddresstransaction(const Array& params, bool fHelp)
     }
 
     
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();    
     
     vector<CTxDestination> fromaddresses;        
     
@@ -858,9 +845,6 @@ Value getaddresstransaction(const Array& params, bool fHelp)
     {
         throw JSONRPCError(RPC_TX_NOT_FOUND, "This transaction was not found for this address");                                
     }
-    
-    delete lpScript;
-    delete asset_amounts;
     
     return entry;
 }

@@ -168,15 +168,7 @@ Value liststreams(const Array& params, bool fHelp)
     
     int root_stream_name_size;
     mc_gState->m_NetworkParams->GetParam("rootstreamname",&root_stream_name_size);        
-    if( (root_stream_name_size <= 1) && (inputStrings.size() == 0) && (mc_gState->m_Features->FixedIn10008() == 0) )            // Patch, to be removed in 10008
-    {
-        mc_AdjustStartAndCount(&count,&start,streams->GetCount()-1);        
-        start++;            
-    }
-    else
-    {
-        mc_AdjustStartAndCount(&count,&start,streams->GetCount());        
-    }
+    mc_AdjustStartAndCount(&count,&start,streams->GetCount());        
     
     
     Array partial_results;
@@ -238,10 +230,6 @@ Value liststreams(const Array& params, bool fHelp)
     {
         return_partial=true;
     }
-    if( (root_stream_name_size <= 1) && (inputStrings.size() == 0)  && (mc_gState->m_Features->FixedIn10008() == 0) )            // Patch, to be removed in 10008
-    {
-        return_partial=true;        
-    }
     mc_gState->m_Assets->FreeEntityList(streams);
     if(return_partial)
     {
@@ -260,22 +248,17 @@ Value createstreamfromcmd(const Array& params, bool fHelp)
     if (fHelp || params.size() < 4)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
-    
     if (strcmp(params[1].get_str().c_str(),"stream"))
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid entity type, should be stream");
 
     CWalletTx wtx;
     
-    mc_Script *lpScript;
-    
-    mc_Script *lpDetailsScript;
-    lpDetailsScript=NULL;
-    
-    mc_Script *lpDetails;
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;   
+    lpScript->Clear();
+    mc_Script *lpDetailsScript=mc_gState->m_TmpBuffers->m_RpcScript1;    
+    lpDetailsScript->Clear();
+    mc_Script *lpDetails=mc_gState->m_TmpBuffers->m_RpcScript2;
+    lpDetails->Clear();
     
     int ret,type;
     string stream_name="";
@@ -288,15 +271,9 @@ Value createstreamfromcmd(const Array& params, bool fHelp)
         stream_name=params[2].get_str();
     }
     
-    if(params[3].type() != bool_type)
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid open flag, should be boolean");
-    
-    if(mc_gState->m_Features->Streams())
+    if(stream_name == "*")
     {
-        if(stream_name == "*")
-        {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid stream name: *");                                                                                            
-        }
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid stream name: *");                                                                                            
     }
 
     unsigned char buf_a[MC_AST_ASSET_REF_SIZE];    
@@ -322,14 +299,73 @@ Value createstreamfromcmd(const Array& params, bool fHelp)
         }        
     }
 
-    lpScript=new mc_Script;
+    lpScript->Clear();
     
-    lpDetails=new mc_Script;
+    lpDetails->Clear();
     lpDetails->AddElement();
-    if(params[3].get_bool())
+    
+    if(mc_gState->m_Features->OffChainData())
     {
-        unsigned char b=1;        
-        lpDetails->SetSpecialParamValue(MC_ENT_SPRM_ANYONE_CAN_WRITE,&b,1);        
+        string strError;
+        uint32_t permissions=0;
+        uint32_t restrict=0;
+        if(params[3].type() != bool_type)
+        {
+            if(params[3].type() == obj_type)
+            {
+                BOOST_FOREACH(const Pair& d, params[3].get_obj()) 
+                {
+                    if(d.name_ == "restrict")
+                    {
+                        if(RawDataParseRestrictParameter(d.value_,&restrict,&permissions,&strError))
+                        {
+                            if(restrict & MC_ENT_ENTITY_RESTRICTION_OFFCHAIN)
+                            {
+                                if(restrict & MC_ENT_ENTITY_RESTRICTION_ONCHAIN)
+                                {
+                                    throw JSONRPCError(RPC_NOT_SUPPORTED, "Stream cannot be restricted from both onchain and offchain items");               
+                                }                        
+                            }                            
+                        }
+                        else
+                        {
+                            throw JSONRPCError(RPC_INVALID_PARAMETER, strError);                                                                           
+                        }
+                    }
+                    else
+                    {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid field, should be restrict");               
+                    }
+                }
+            }
+            else
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid open flag, should be boolean or object");               
+            }
+        }
+        else
+        {            
+            permissions = params[3].get_bool() ? MC_PTP_NONE : MC_PTP_WRITE;
+        }
+        lpDetails->SetSpecialParamValue(MC_ENT_SPRM_PERMISSIONS,(unsigned char*)&permissions,1);                                
+        if(restrict)
+        {
+            lpDetails->SetSpecialParamValue(MC_ENT_SPRM_RESTRICTIONS,(unsigned char*)&restrict,1);                         
+        }
+        
+    }
+    else
+    {
+        if(params[3].type() != bool_type)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid open flag, should be boolean or object");
+        }
+
+        if(params[3].get_bool())
+        {
+            unsigned char b=1;        
+            lpDetails->SetSpecialParamValue(MC_ENT_SPRM_ANYONE_CAN_WRITE,&b,1);        
+        }
     }
     if(stream_name.size())
     {        
@@ -361,7 +397,7 @@ Value createstreamfromcmd(const Array& params, bool fHelp)
     
     int errorCode=RPC_INVALID_PARAMETER;
     string strError;    
-    lpDetailsScript=new mc_Script;
+    lpDetailsScript->Clear();
     if (params.size() > 4)
     {
         ParseRawDetails(&(params[4]),lpDetails,lpDetailsScript,&errorCode,&strError);        
@@ -381,54 +417,16 @@ Value createstreamfromcmd(const Array& params, bool fHelp)
     size_t elem_size;
     const unsigned char *elem;
     
-    if(mc_gState->m_Features->OpDropDetailsScripts())
+    err=lpDetailsScript->SetNewEntityType(MC_ENT_TYPE_STREAM,0,script,bytes);
+    if(err)
     {
-        err=lpDetailsScript->SetNewEntityType(MC_ENT_TYPE_STREAM,0,script,bytes);
-        if(err)
-        {
-            strError= "Invalid custom fields or stream name, too long";
-            goto exitlbl;
+        strError= "Invalid custom fields or stream name, too long";
+        goto exitlbl;
 //            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid custom fields or stream name, too long");                                                        
-        }
-        
-        elem = lpDetailsScript->GetData(0,&elem_size);
-        scriptOpReturn << vector<unsigned char>(elem, elem + elem_size) << OP_DROP << OP_RETURN;        
     }
-    else
-    {
-        lpDetailsScript->SetNewEntityType(MC_ENT_TYPE_STREAM);
 
-        err=lpDetailsScript->SetGeneralDetails(script,bytes);
-        if(err)
-        {
-            strError= "Invalid custom fields or stream name, too long";
-            goto exitlbl;
-//            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid custom fields or stream name, too long");                                                    
-        }
-
-        for(int e=0;e<lpDetailsScript->GetNumElements();e++)
-        {
-            elem = lpDetailsScript->GetData(e,&elem_size);
-            if(e == (lpDetailsScript->GetNumElements() - 1) )
-            {
-                if(elem_size > 0)
-                {
-                    scriptOpReturn << OP_RETURN << vector<unsigned char>(elem, elem + elem_size);
-                }
-                else
-                {
-                    scriptOpReturn << OP_RETURN;
-                }
-            }
-            else
-            {
-                if(elem_size > 0)
-                {
-                    scriptOpReturn << vector<unsigned char>(elem, elem + elem_size) << OP_DROP;
-                }                
-            }
-        }    
-    }
+    elem = lpDetailsScript->GetData(0,&elem_size);
+    scriptOpReturn << vector<unsigned char>(elem, elem + elem_size) << OP_DROP << OP_RETURN;        
     
     
     if(params[0].get_str() != "*")
@@ -488,13 +486,6 @@ Value createstreamfromcmd(const Array& params, bool fHelp)
     
 exitlbl:
 
-    if(lpDetailsScript)
-    {
-        delete lpDetailsScript;
-    }
-    delete lpDetails;
-    delete lpScript;
-  
     if(strError.size())
     {
         throw JSONRPCError(errorCode, strError);            
@@ -508,10 +499,6 @@ Value createfromcmd(const Array& params, bool fHelp)
     if (fHelp || params.size() < 4)
         throw runtime_error("Help message not found\n");
     
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if (strcmp(params[1].get_str().c_str(),"stream") == 0)
     {
         return createstreamfromcmd(params,fHelp);    
@@ -529,11 +516,6 @@ Value createcmd(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() < 3)
         throw runtime_error("Help message not found\n");
-
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     
     Array ext_params;
     ext_params.push_back("*");
@@ -549,12 +531,7 @@ Value publish(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() < 3 || params.size() > 4)
         throw runtime_error("Help message not found\n");
-    
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
-    
+        
     Array ext_params;
     ext_params.push_back("*");
     BOOST_FOREACH(const Value& value, params)
@@ -567,15 +544,12 @@ Value publish(const Array& params, bool fHelp)
 
 Value publishfrom(const Array& params, bool fHelp)
 {
-    if (fHelp || params.size() != 4)
+    if (fHelp || params.size() < 4 || params.size() > 5)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
-           
-    mc_Script *lpScript;
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();
+    
     mc_EntityDetails stream_entity;
     parseStreamIdentifier(params[1],&stream_entity);           
                
@@ -583,6 +557,11 @@ Value publishfrom(const Array& params, bool fHelp)
     // Wallet comments
     CWalletTx wtx;
             
+    uint32_t in_options,out_options;
+    
+    in_options=MC_RFD_OPTION_NONE;
+    out_options=MC_RFD_OPTION_NONE;
+    
     vector<CTxDestination> addresses;    
     
     vector<CTxDestination> fromaddresses;        
@@ -641,24 +620,78 @@ Value publishfrom(const Array& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid item-key-string: *");                
         }
     }
+
+    if(params.size() > 4 )
+    {
+        if(params[4].type() != str_type)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Stream item options must be offchain or empty");                                                                                                                            
+        }
+        if( mc_gState->m_Features->OffChainData() == 0 )
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Format options are not supported by this protocol version");                                                                                                                            
+        }        
+        if(params[4].get_str().size())
+        {
+            if(params[4].get_str() == "offchain")
+            {
+                in_options |= MC_RFD_OPTION_OFFCHAIN;
+            }
+            else
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Stream item options must be offchain or empty");                                                                                                                            
+            }
+        }
+    }
+
+    if( mc_gState->m_Features->OffChainData() )
+    {
+        if(in_options & MC_RFD_OPTION_OFFCHAIN)
+        {
+            if(stream_entity.Restrictions() & MC_ENT_ENTITY_RESTRICTION_OFFCHAIN)
+            {
+                throw JSONRPCError(RPC_NOT_ALLOWED, "Publishing offchain items is not allowed to this stream");     
+            }
+        }
+        else
+        {
+            if(stream_entity.Restrictions() & MC_ENT_ENTITY_RESTRICTION_ONCHAIN)
+            {
+                throw JSONRPCError(RPC_NOT_ALLOWED, "Publishing onchain items is not allowed to this stream");     
+            }            
+        }
+    }
     
-    mc_Script *lpDetailsScript;
-    lpDetailsScript=NULL;
-        
+    if(keys.size() > 1)
+    {
+        if( mc_gState->m_Features->MultipleStreamKeys() == 0 )
+        {
+            throw JSONRPCError(RPC_NOT_SUPPORTED, "Multiple keys are not supported by this protocol version");                            
+        }
+    }
+    
+    mc_Script *lpDetailsScript=mc_gState->m_TmpBuffers->m_RpcScript1;
+    lpDetailsScript->Clear();
+    
     uint32_t data_format=MC_SCR_DATA_FORMAT_UNKNOWN;
     
     vector<unsigned char> dataData;
-    lpDetailsScript=new mc_Script;
+    lpDetailsScript->Clear();
 
     string strError;
     int errorCode=RPC_INVALID_PARAMETER;
-    dataData=ParseRawFormattedData(&(params[3]),&data_format,lpDetailsScript,&errorCode,&strError);
+    vector<uint256> vChunkHashes;
+    
+    dataData=ParseRawFormattedData(&(params[3]),&data_format,lpDetailsScript,in_options,&out_options,&errorCode,&strError);
 
     if(strError.size())
     {
-        delete lpDetailsScript;
         throw JSONRPCError(errorCode, strError);                                                                                                                
     }
+    
+    size_t elem_size;
+    const unsigned char *elem;
+    CScript scriptOpReturn=CScript();
     
     lpDetailsScript->Clear();
     lpDetailsScript->SetEntity(stream_entity.GetTxID()+MC_AST_SHORT_TXID_OFFSET);
@@ -666,55 +699,66 @@ Value publishfrom(const Array& params, bool fHelp)
     {
         lpDetailsScript->SetItemKey((unsigned char*)keys[k].get_str().c_str(),keys[k].get_str().size());
     }
-    if( data_format != MC_SCR_DATA_FORMAT_UNKNOWN )
-    {
-        lpDetailsScript->SetDataFormat(data_format);
-    }
-    
-    lpDetailsScript->AddElement();
-    if(dataData.size())
-    {
-        lpDetailsScript->SetData(&dataData[0],dataData.size());
-    }
 
-    size_t elem_size;
-    const unsigned char *elem;
-    CScript scriptOpReturn=CScript();
+    if( (in_options & MC_RFD_OPTION_OFFCHAIN) == 0)
+    {
+        if( data_format != MC_SCR_DATA_FORMAT_UNKNOWN )
+        {
+            lpDetailsScript->SetDataFormat(data_format);
+        }        
+    }
     
     for(int e=0;e<lpDetailsScript->GetNumElements();e++)
     {
         elem = lpDetailsScript->GetData(e,&elem_size);
-        if(e == (lpDetailsScript->GetNumElements() - 1) )
+        if(elem_size > 0)
         {
-            if(elem_size > 0)
-            {
-                scriptOpReturn << OP_RETURN << vector<unsigned char>(elem, elem + elem_size);
-            }
-            else
-            {
-                scriptOpReturn << OP_RETURN;
-            }
+            scriptOpReturn << vector<unsigned char>(elem, elem + elem_size) << OP_DROP;
+        }                
+    }    
+    
+    lpDetailsScript->Clear();
+    if(in_options & MC_RFD_OPTION_OFFCHAIN)        
+    {
+        AppendOffChainFormatData(data_format,out_options,lpDetailsScript,dataData,&vChunkHashes,&errorCode,&strError);
+        if(strError.size())
+        {
+            throw JSONRPCError(errorCode, strError);                                                                                                                
+        }
+        elem = lpDetailsScript->GetData(0,&elem_size);
+        scriptOpReturn << vector<unsigned char>(elem, elem + elem_size) << OP_DROP;                    
+        scriptOpReturn << OP_RETURN;                                                
+    }
+    else
+    {
+        if(out_options & MC_RFD_OPTION_OFFCHAIN)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "chunks data type is not allowed with missing options field");                
+        }
+        lpDetailsScript->AddElement();
+        if(dataData.size())
+        {
+            lpDetailsScript->SetData(&dataData[0],dataData.size());
+        }
+        elem = lpDetailsScript->GetData(0,&elem_size);
+        if(elem_size > 0)
+        {
+            scriptOpReturn << OP_RETURN << vector<unsigned char>(elem, elem + elem_size);
         }
         else
         {
-            if(elem_size > 0)
-            {
-                scriptOpReturn << vector<unsigned char>(elem, elem + elem_size) << OP_DROP;
-            }                
+            scriptOpReturn << OP_RETURN;
         }
-    }    
+    }
     
-    
-    lpScript=new mc_Script;
+
+    lpScript->Clear();
          
     EnsureWalletIsUnlocked();
     LOCK (pwalletMain->cs_wallet_send);
     
     SendMoneyToSeveralAddresses(addresses, 0, wtx, lpScript, scriptOpReturn,fromaddresses);
 
-    delete lpDetailsScript;
-    delete lpScript;
-  
     return wtx.GetHash().GetHex();    
 }
 
@@ -723,10 +767,6 @@ Value subscribe(const Array& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. To get this functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -800,7 +840,7 @@ Value subscribe(const Array& params, bool fHelp)
     
     if (fRescan && fNewFound)
     {
-        pwalletMain->ScanForWalletTransactions(chainActive.Genesis(), true, true);
+        pwalletMain->ScanForWalletTransactions(chainActive.Genesis(), true, true, true);
     }
 
     return Value::null;
@@ -812,16 +852,12 @@ Value unsubscribe(const Array& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. To get this functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
     }   
        
-
+    bool purge=false;
     vector<mc_EntityDetails> inputEntities;
     vector<string> inputStrings;
     if(params[0].type() == str_type)
@@ -833,6 +869,18 @@ Value unsubscribe(const Array& params, bool fHelp)
         inputStrings=ParseStringList(params[0]);
     }
     
+    if(params.size() > 1)
+    {
+        if(params[1].type() == bool_type)
+        {
+            purge=params[1].get_bool();
+        }
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid value for 'purge' field, should be boolean");                                                                
+        }        
+    }
+    
     for(int is=0;is<(int)inputStrings.size();is++)
     {
         mc_EntityDetails entity_to_subscribe;
@@ -841,8 +889,7 @@ Value unsubscribe(const Array& params, bool fHelp)
         inputEntities.push_back(entity_to_subscribe);
     }
         
-    mc_Buffer *streams;
-    streams=new mc_Buffer;
+    mc_Buffer *streams=mc_gState->m_TmpBuffers->m_RpcBuffer1;
     streams->Initialize(sizeof(mc_TxEntity),sizeof(mc_TxEntity),MC_BUF_MODE_DEFAULT);
     
     
@@ -886,14 +933,12 @@ Value unsubscribe(const Array& params, bool fHelp)
 
     if(fNewFound)
     {
-        if(pwalletTxsMain->Unsubscribe(streams))
+        if(pwalletTxsMain->Unsubscribe(streams,purge))
         {
-            delete streams;
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't unsubscribe from stream");                                    
         }
     }
 
-    delete streams;
     return Value::null;
 }
 
@@ -902,10 +947,6 @@ Value liststreamtxitems(const Array& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 3)
         throw runtime_error("Help message not found\n");
    
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -988,7 +1029,7 @@ int mc_GetHashAndFirstOutput(mc_TxEntityRow *lpEntTx,uint256 *hash)
         erow.m_Pos=lpEntTx->m_Pos;
         first_output=(int)mc_GetLE(lpEntTx->m_TxId+MC_TEE_OFFSET_IN_TXID,sizeof(uint32_t));
         count=(int)mc_GetLE(lpEntTx->m_TxId+MC_TEE_OFFSET_IN_TXID+sizeof(uint32_t),sizeof(uint32_t));
-        if(erow.m_Pos > count)
+        if((int)erow.m_Pos > count)
         {
             erow.m_Pos-=count;
             if(pwalletTxsMain->GetRow(&erow) == 0)
@@ -1006,10 +1047,6 @@ Value liststreamitems(const Array& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 5)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -1059,9 +1096,8 @@ Value liststreamitems(const Array& params, bool fHelp)
         throw JSONRPCError(RPC_NOT_SUBSCRIBED, "Not subscribed to this stream");                                
     }
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
     
     mc_AdjustStartAndCount(&count,&start,entStat.m_LastPos);
     
@@ -1081,8 +1117,6 @@ Value liststreamitems(const Array& params, bool fHelp)
             retArray.push_back(entry);                                
         }
     }
-    
-    delete entity_rows;
     
     return retArray;
 }
@@ -1120,10 +1154,6 @@ Value liststreamblockitems(const Array& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 5)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -1176,9 +1206,8 @@ Value liststreamblockitems(const Array& params, bool fHelp)
     height_from=heights[0];
     height_to=heights[0];
 
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
     
     for(unsigned int i=1;i<heights.size();i++)
     {
@@ -1192,7 +1221,6 @@ Value liststreamblockitems(const Array& params, bool fHelp)
     
     
     getTxsForBlockRange(txids,&entStat.m_Entity,height_from,height_to,entity_rows);
-    delete entity_rows;
     
     mc_AdjustStartAndCount(&count,&start,txids.size());
     
@@ -1267,10 +1295,6 @@ void getSubKeyEntityFromPublisher(string str,mc_TxEntityStat entStat,mc_TxEntity
 
 Value getstreamsummary(const Array& params, bool fPublisher)
 {
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -1326,9 +1350,14 @@ Value getstreamsummary(const Array& params, bool fPublisher)
             mode |= MC_VMM_RECURSIVE;
             found=true;
         }
-        if(inputStrings[j]=="ignore")
+        if( (inputStrings[j]=="ignore") || (inputStrings[j]=="ignoreother") )
         {
-            mode |= MC_VMM_IGNORE;
+            mode |= MC_VMM_IGNORE_OTHER;
+            found=true;
+        }
+        if(inputStrings[j]=="ignoremissing")
+        {
+            mode |= MC_VMM_IGNORE_MISSING;
             found=true;
         }
         if(inputStrings[j]=="noupdate")
@@ -1376,13 +1405,13 @@ Value getstreamsummary(const Array& params, bool fPublisher)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "missing jsonobjectmerge");                                                    
     }
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
         
     Object empty_object;
     Object obj;
     int i,n,c,m,err,pcount;
+    bool available;
     err=MC_ERR_NOERROR;
     n=pwalletTxsMain->GetListSize(&entity,entStat.m_Generation,NULL);
     i=0;
@@ -1453,32 +1482,72 @@ Value getstreamsummary(const Array& params, bool fPublisher)
             }
         }
         
+        available=true;
+        BOOST_FOREACH(const Pair& a, entry) 
+        {
+            if(a.name_ == "offchain")
+            {
+                available=!a.value_.get_bool();
+            }
+        }
+        
+        if(!available)
+        {
+            BOOST_FOREACH(const Pair& a, entry) 
+            {
+                if(a.name_ == "available")
+                {
+                    available=a.value_.get_bool();
+                }
+            }
+        }
+                        
+        
         BOOST_FOREACH(const Pair& a, entry) 
         {
             if(a.name_ == "data")
             {
-                if(i == 0)
+                if(available)
                 {
-//                    if(a.value_.type() == obj_type)
-/*                    
+                    if(i == 0)
                     {
-                        result=empty_object;
-                    }
-
-                    if( (i==0) && ((mode & MC_VMM_TAKE_FIRST) != 0) )               
-                    {
-                        result=mc_MergeValues(&(a.value_),&result,mode,0,&err);
+                        result=a.value_;
                     }
                     else
                     {
                         result=mc_MergeValues(&result,&(a.value_),mode,0,&err);
-                    }         
- */ 
-                    result=a.value_;
+                    }
                 }
                 else
                 {
-                    result=mc_MergeValues(&result,&(a.value_),mode,0,&err);
+                    available=true;
+                    BOOST_FOREACH(const Pair& b, a.value_.get_obj()) 
+                    {
+                        if(b.name_ == "format")
+                        {
+                            available=false;
+                            if(b.value_.get_str() != "json")
+                            {
+                                if(mode & MC_VMM_IGNORE_OTHER)
+                                {
+                                    available=true;
+                                }
+                                else
+                                {
+                                    err=MC_ERR_INVALID_PARAMETER_VALUE;                                            
+                                    goto exitlbl;
+                                }
+                            }
+
+                        }
+                    }
+                    if( (mode & MC_VMM_IGNORE_MISSING) == 0)
+                    {
+                        if(!available)
+                        {
+                            throw JSONRPCError(RPC_NOT_ALLOWED, "Some items to be merged are missing (try using \'ignoremissing\')" );                                                                            
+                        }
+                    }                    
                 }
             }
         }    
@@ -1498,17 +1567,19 @@ Value getstreamsummary(const Array& params, bool fPublisher)
     }            
     else
     {
+        if( (mode & MC_VMM_IGNORE_OTHER) == 0)
+        {
+            err=MC_ERR_INVALID_PARAMETER_VALUE;
+        }
         obj.push_back(Pair("json", empty_object));        
     }
     result=obj;
     
 exitlbl:    
 
-    delete entity_rows;
-    
     if(err)
     {
-        throw JSONRPCError(RPC_NOT_ALLOWED, "Some items to be merged are in the wrong format (try using \'ignore\')" );                                                    
+        throw JSONRPCError(RPC_NOT_ALLOWED, "Some items to be merged are in the wrong format (try using \'ignoreother\')" );                                                    
     }
 
     return result;
@@ -1535,10 +1606,6 @@ Value liststreamkeyitems(const Array& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 6)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -1610,9 +1677,8 @@ Value liststreamkeyitems(const Array& params, bool fHelp)
     getSubKeyEntityFromKey(params[1].get_str(),entStat,&entity);
     
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
     
     mc_AdjustStartAndCount(&count,&start,pwalletTxsMain->GetListSize(&entity,entStat.m_Generation,NULL));
     
@@ -1633,8 +1699,6 @@ Value liststreamkeyitems(const Array& params, bool fHelp)
         }
     }
     
-    delete entity_rows;
-    
     return retArray;
 }
 
@@ -1644,10 +1708,6 @@ Value liststreampublisheritems(const Array& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 6)
         throw runtime_error("Help message not found\n");
 
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -1719,9 +1779,8 @@ Value liststreampublisheritems(const Array& params, bool fHelp)
     const char *key_ptr=key_string.c_str();
     getSubKeyEntityFromPublisher(params[1].get_str(),entStat,&entity);
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
     
     mc_AdjustStartAndCount(&count,&start,pwalletTxsMain->GetListSize(&entity,entStat.m_Generation,NULL));
     
@@ -1742,8 +1801,6 @@ Value liststreampublisheritems(const Array& params, bool fHelp)
         }
     }
     
-    delete entity_rows;
-    
     return retArray;
 }
 
@@ -1760,20 +1817,19 @@ Value liststreammap_operation(mc_TxEntity *parent_entity,vector<mc_TxEntity>& in
     mc_TxEntity entity;
     mc_TxEntityStat entStat;
     Array retArray;
-    mc_Buffer *entity_rows;
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
     mc_TxEntityRow erow;
     uint160 stream_subkey_hash;    
     int row,enitity_count;
     const char **given_key;
     const char **given_publisher;
     
-    entity_rows=NULL;
+    entity_rows->Clear();
     enitity_count=inputEntities.size();
     if(enitity_count == 0)
     {
         mc_AdjustStartAndCount(&count,&start,pwalletTxsMain->GetListSize(parent_entity,NULL));
-        entity_rows=new mc_Buffer;
-        entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+        entity_rows->Clear();
         pwalletTxsMain->GetList(parent_entity,start+1,count,entity_rows);
         enitity_count=entity_rows->GetCount();
     }
@@ -1794,7 +1850,7 @@ Value liststreammap_operation(mc_TxEntity *parent_entity,vector<mc_TxEntity>& in
     {
         mc_TxEntityRow *lpEntTx;
         string key_string;
-        if(entity_rows)
+        if(entity_rows->GetCount())
         {
             lpEntTx=(mc_TxEntityRow*)entity_rows->GetRow(i);
             key_string=pwalletTxsMain->GetSubKey(lpEntTx->m_TxId, NULL,NULL);
@@ -1870,11 +1926,6 @@ Value liststreammap_operation(mc_TxEntity *parent_entity,vector<mc_TxEntity>& in
         retArray.push_back(all_entry);                                
     }
 
-    if(entity_rows)
-    {
-        delete entity_rows;
-    }
-    
     return retArray;
 }
 
@@ -1988,10 +2039,6 @@ Value liststreamkeys(const Array& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 6)
         throw runtime_error("Help message not found\n");
     
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
@@ -2009,11 +2056,6 @@ Value liststreampublishers(const Array& params, bool fHelp)
         throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. For full streams functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
     }   
     
-    if(mc_gState->m_Features->Streams() == 0)
-    {
-        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported for this protocol version");        
-    }
-           
     return liststreamkeys_or_publishers(params,true);
 }
 
