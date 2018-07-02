@@ -1,0 +1,19 @@
+stages:
+  - autogen
+  - configure
+  - make
+
+autogen:
+  stage: autogen
+    script:
+      - ./autogen.sh
+
+configure:
+  stage: configure
+    script:
+      - ./configure
+
+make:
+  stage: make
+    script:
+      - make
